@@ -1,0 +1,66 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Complexity Buddy – dev harness</title>
+<body style="margin:0;height:100vh;background:#1e1e1e;color:#d4d4d4;font:14px -apple-system,sans-serif">
+<div style="padding:24px;max-width:560px">
+  <h3>Dev harness (fake chrome.* APIs + fake Monaco)</h3>
+  <p>Runs the real <code>../content.js</code>, <code>../code-check.js</code> and <code>../page-bridge.js</code>.
+     Query flags: <code>?nokey</code> &middot; <code>?starter</code> (editor holds only the LeetCode starter template).</p>
+  <pre id="ed" contenteditable spellcheck="false" style="background:#111;padding:12px;border-radius:8px;min-height:140px"></pre>
+  <p id="log" style="color:#888">fake Groq calls so far: 0</p>
+</div>
+<script>
+  const q = location.search;
+  const STARTER = 'class Solution:\n    def firstMissingPositive(self, nums: List[int]) -> int:\n        ';
+  const REAL = 'def two_sum(nums, target):\n    seen = {}\n    for i, x in enumerate(nums):\n        if target - x in seen:\n            return [seen[target - x], i]\n        seen[x] = i';
+  document.getElementById('ed').textContent = q.includes('starter') ? STARTER : REAL;
+
+  // test-only: expose the (normally closed) shadow root so the harness can poke at it
+  const _attach = Element.prototype.attachShadow;
+  Element.prototype.attachShadow = function (init) { const r = _attach.call(this, { ...init, mode: 'open' }); if (this.id === 'lcx-host') window.__root = r; return r; };
+
+  const mem = { lcxUi: { side: 'right', y: 120, pinned: false } };
+  const keys = q.includes('nokey') ? [] : [{ id: 'a', key: 'gsk_fakeAAAA1111', status: 'ready' }, { id: 'b', key: 'gsk_fakeBBBB2222', status: 'rate', wait: 42 }];
+  if (keys.length) mem.groqKeys = keys.map(({ id, key }) => ({ id, key }));
+
+  const fakeEd = { getModel: () => model, getDomNode: () => document.getElementById('ed'), hasTextFocus: () => false };
+  const model = { getValue: () => document.getElementById('ed').textContent, getLanguageId: () => 'python' };
+  window.monaco = { editor: { getEditors: () => [fakeEd], getModels: () => [model] } };
+
+  let calls = 0;
+  window.__calls = () => calls;
+  const log = () => (document.getElementById('log').textContent = `fake Groq calls so far: ${calls}`);
+  window.chrome = {
+    runtime: {
+      id: 'harness',
+      onMessage: { addListener() {} },
+      async sendMessage(m) {
+        if (m.type === 'keys:list') return { ok: true, keys: keys.map((k) => ({ id: k.id, masked: k.key.slice(0, 4) + '…' + k.key.slice(-4), status: k.status, wait: k.wait || 0 })) };
+        if (m.type === 'keys:add') {
+          if (!/^gsk_/.test(m.key)) return { ok: false, error: 'That doesn’t look like a Groq key (they start with gsk_).' };
+          keys.push({ id: 'k' + keys.length, key: m.key, status: 'ready' }); mem.groqKeys = keys.map(({ id, key }) => ({ id, key })); return { ok: true, count: keys.length };
+        }
+        if (m.type === 'keys:remove') { const i = keys.findIndex((k) => k.id === m.id); if (i > -1) keys.splice(i, 1); mem.groqKeys = keys.map(({ id, key }) => ({ id, key })); return { ok: true, count: keys.length }; }
+        if (m.type === 'models') return { ok: true, models: ['openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'qwen/qwen3.8-27b', 'moonshotai/kimi-k2-instruct'] };
+        // analyze
+        calls++; log();
+        await new Promise((r) => setTimeout(r, 700));
+        const nested = (m.code.match(/for /g) || []).length > 1;
+        return { ok: true, model: mem.model || 'openai/gpt-oss-120b', ms: 640, keyIndex: 2, keyCount: keys.length,
+          result: nested ? { time: 'O(n^2)', space: 'O(1)', timeWhy: 'Nested loops each iterate over the input.', spaceWhy: 'Only a few scalars.', approach: 'Brute force', better: 'Hash map gives O(n) time.' }
+                         : { time: 'O(n)', space: 'O(n)', timeWhy: 'Single pass; dict ops are O(1) average.', spaceWhy: 'The dict may hold every element.', approach: 'Hash map one-pass', better: '' } };
+      },
+    },
+    storage: {
+      local: {
+        get(k, cb) { const o = {}; for (const key of [].concat(k)) if (key in mem) o[key] = mem[key]; cb(o); },
+        set(obj, cb) { Object.assign(mem, obj); cb && cb(); },
+        remove(k, cb) { for (const key of [].concat(k)) delete mem[key]; cb && cb(); },
+      },
+      onChanged: { addListener() {} },
+    },
+  };
+</script>
+<script src="../code-check.js"></script>
+<script src="../page-bridge.js"></script>
+<script src="../content.js"></script>
