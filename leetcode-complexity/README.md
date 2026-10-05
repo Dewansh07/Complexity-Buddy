@@ -6,6 +6,10 @@ complexity of your code, powered by the Groq API.
 - It pops up on the right edge by itself on both sites. Drag it anywhere; it snaps to the left or right edge.
 - **Hover** it to peek at the Time / Space complexity (analyzes your current code, cached if unchanged).
 - **Click** it to pin the panel open. Click it again, or hit **−**, to tuck it away.
+- **Optimal target**: a card shows the best time/space you should aim for on *this* problem (e.g. `O(n) time · O(1) space`)
+  and whether your code is already there. On a problem page it sends the title plus the statement's stated requirements
+  and constraints (LeetCode and NeetCode), so "must run in O(n) time" is respected. The target is remembered per problem so it
+  doesn't change between hovers; the ↻ button recomputes it.
 - The face and little badge always show the latest result: happy = fast, meh = n², worried = exponential.
 - **Live update** toggle: re-analyzes a moment after you stop typing, even while the panel is tucked away.
 - Select code on any page (solutions, discuss) and hover: it analyzes the selection instead of the editor.

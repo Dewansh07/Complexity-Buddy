@@ -22,6 +22,7 @@
     open: false,
     hasKey: false,
     model: DEFAULT_MODEL,
+    targets: {}, // slug -> { time, space, how }: the optimal we already established per problem
     auto: false,
   };
 
@@ -119,6 +120,13 @@
     .card .k { font-size: 10.5px; letter-spacing: .09em; text-transform: uppercase; color: #8b94a4; }
     .card .v { font: 700 19px/1.3 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--c); word-break: break-word; }
     .card .why { margin-top: 2px; font-size: 12px; color: #b4bccb; }
+    .card.target { --c: #38bdf8; }
+    .target .thead { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+    .target .chip { text-transform: none; letter-spacing: 0; font-size: 10.5px; font-weight: 600; padding: 1px 8px; border-radius: 999px; white-space: nowrap; }
+    .target.hit .chip { background: rgba(74,222,128,.16); color: #4ade80; }
+    .target.gap .chip { background: rgba(251,191,36,.16); color: #fbbf24; }
+    .target .v { font-size: 15px; }
+    .badge.hit { border-color: rgba(74,222,128,.6); }
     .note { font-size: 12px; color: #b4bccb; padding: 0 2px; }
     .note b { color: #e8ecf1; font-weight: 600; margin-right: 4px; }
     .note.tip b { color: #7dd3fc; }
@@ -489,7 +497,8 @@
   autoChk.addEventListener('change', () => store.set({ auto: autoChk.checked }));
 
   async function loadSettings() {
-    const s = await store.get(['groqKeys', 'groqKey', 'model', 'auto']);
+    const s = await store.get(['groqKeys', 'groqKey', 'model', 'auto', 'lcxTargets']);
+    state.targets = s.lcxTargets && typeof s.lcxTargets === 'object' ? s.lcxTargets : {};
     state.hasKey = (Array.isArray(s.groqKeys) && s.groqKeys.length > 0) || !!s.groqKey; // groqKey = pre-multi-key installs
     state.auto = !!s.auto;
     autoChk.checked = state.auto;
@@ -538,7 +547,69 @@
     if (dom.trim()) return { code: dom, lang: '', source: 'editor (visible lines)' };
     return null;
   }
-  const keyOf = (src) => hashStr(src.lang + '\u0000' + src.code);
+  const keyOf = (src) => hashStr(src.lang + '\u0000' + src.code) + '|' + problemSlug();
+
+  // ---------- problem context: which question, what it demands, how big n can be ----------
+  const titleCase = (t) => t.replace(/-+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+  const problemSlug = () => { const m = location.pathname.match(/\/problems\/([^/?#]+)/); return m ? m[1].toLowerCase() : ''; };
+
+  function problemContext() {
+    const slug = problemSlug();
+    if (!slug) return null;
+    let title = document.title
+      .replace(/\s*[-|–—]\s*(?:LeetCode|NeetCode).*$/i, '')
+      .replace(/\s*[-|–—]\s*(?:Solutions?|Description|Submissions?|Editorial|Discuss(?:ion)?)\s*$/i, '')
+      .trim();
+    if (!title || /^(?:leetcode|neetcode)\b/i.test(title)) title = titleCase(slug);
+    const ctx = { slug, title, site: /neetcode/i.test(location.hostname) ? 'NeetCode' : 'LeetCode', hints: [], constraints: '' };
+
+    // Only the statement panel (when it's on screen), so we never pick up complexity claims from a solution/discussion.
+    const root = document.querySelector('[data-track-load="description_content"], .question-tab');
+    if (root) {
+      const lines = root.innerText.split(/\n+/).map((l) => l.trim()).filter(Boolean);
+      ctx.hints = lines
+        .filter((l) => l.length <= 240 && /O\(|follow[- ]?up|constant (?:extra )?space|auxiliary space|in[- ]place|without (?:using )?extra|extra space/i.test(l))
+        .slice(0, 3);
+      const ci = lines.findIndex((l) => /^constraints:?$/i.test(l));
+      if (ci >= 0) {
+        ctx.constraints = lines.slice(ci + 1, ci + 6)
+          .filter((l) => l.length <= 120 && !/^(?:topics|recommended|hints?|company|follow)/i.test(l))
+          .join(' ; ').slice(0, 300);
+      }
+    }
+    return ctx;
+  }
+
+  function rememberTarget(slug, o) {
+    state.targets[slug] = { time: o.time, space: o.space, how: o.how };
+    const keys = Object.keys(state.targets);
+    if (keys.length > 400) for (const k of keys.slice(0, keys.length - 400)) delete state.targets[k];
+    store.set({ lcxTargets: state.targets });
+  }
+
+  // Rough ordering of common Big-O shapes, used to veto an LLM "you're at the target" that contradicts the numbers.
+  function rank(c) {
+    const t = String(c || '').toLowerCase().replace(/\s+/g, '').replace(/^o\(/, '').replace(/\)$/, '');
+    if (!t) return null;
+    if (/!|\d\^[a-z(]|[nmk]\^[nm]\b/.test(t)) return 7;
+    if (/\^[3-9]|[³⁴]/.test(t)) return 5;
+    if (/\^2|²|[a-z]\*(?!log)[a-z]|[a-z][×·][a-z]|\b[nm]{2}\b/.test(t)) return 4;
+    if (/[nmk]\*?log|log[nmk]\*?[nmk]/.test(t)) return 3;
+    if (/^log/.test(t)) return 1;
+    if (/^\d+$/.test(t)) return 0;
+    if (/[nmkve]/.test(t)) return 2;
+    return null;
+  }
+  const normC = (c) => String(c || '').toLowerCase().replace(/\s+/g, '');
+  function atTarget(r) {
+    const o = r && r.optimal;
+    if (!o) return false;
+    const rt = rank(r.time), ro = rank(o.time), rs = rank(r.space), rso = rank(o.space);
+    const worse = (a, b) => a != null && b != null && a > b;
+    if (worse(rt, ro) || worse(rs, rso)) return false;                 // clearly above the target, whatever the LLM said
+    if (rt != null && ro != null && rs != null && rso != null) return true; // comparable and nothing is worse: at (or beyond) the target
+    return !!o.matches || (normC(o.time) === normC(r.time) && normC(o.space) === normC(r.space));
+  }
 
   // ---------- analysis ----------
   const cache = new Map();
@@ -550,7 +621,7 @@
     $('panel').classList.toggle('loading', b);
   }
 
-  function setBuddy(r) {
+  function setBuddy(r, hit) {
     const gt = grade(r && r.time), gs = grade(r && r.space);
     buddy.dataset.g = r ? worst(gt, gs) : 'na';
     if (!r) { badge.hidden = true; return; }
@@ -559,13 +630,22 @@
     $('bT').style.color = { good: '#4ade80', ok: '#fbbf24', bad: '#f87171', na: '#94a3b8' }[gt];
     $('bS').style.color = { good: '#4ade80', ok: '#fbbf24', bad: '#f87171', na: '#94a3b8' }[gs];
     badge.hidden = false;
-    buddy.title = `Time ${r.time} · Space ${r.space}`;
+    badge.classList.toggle('hit', !!hit);
+    buddy.title = `Time ${r.time} · Space ${r.space}` + (r.optimal ? ` · Target ${r.optimal.time} / ${r.optimal.space}${hit ? ' ✓' : ''}` : '');
   }
 
   function card(label, value, why) {
     const c = el('div', 'card ' + grade(value));
     c.append(el('div', 'k', label), el('div', 'v', value));
     if (why) c.append(el('div', 'why', why));
+    return c;
+  }
+  function targetCard(o, hit) {
+    const c = el('div', 'card target ' + (hit ? 'hit' : 'gap'));
+    const head = el('div', 'k thead');
+    head.append(el('span', null, 'Optimal target'), el('span', 'chip', hit ? '✓ You’re there' : '↑ Room to improve'));
+    c.append(head, el('div', 'v', `${o.time} time · ${o.space} space`));
+    if (o.how) c.append(el('div', 'why', o.how));
     return c;
   }
   function note(label, text, cls) {
@@ -577,13 +657,14 @@
   function renderResult(entry, src, cached) {
     const r = entry.result;
     const nodes = [card('Time', r.time, r.timeWhy), card('Space', r.space, r.spaceWhy)];
-    if (r.approach) nodes.push(note('Approach', r.approach));
-    if (r.better) nodes.push(note('Faster?', r.better, 'tip'));
+    const hit = atTarget(r);
+    if (r.optimal) nodes.push(targetCard(r.optimal, hit));
+    if (r.approach) nodes.push(note('Your approach', r.approach));
     resultEl.replaceChildren(...nodes);
     const lines = src.code.split('\n').length;
     srcEl.textContent = `${src.source}${src.lang ? ' · ' + src.lang : ''} · ${lines} line${lines === 1 ? '' : 's'}`;
     updateFooter(`${entry.model} · ${cached ? 'cached' : (entry.ms / 1000).toFixed(1) + 's'}${entry.keyCount > 1 ? ` · key ${entry.keyIndex}/${entry.keyCount}` : ''}${entry.switchedFrom ? ' · auto-switched' : ''}`);
-    setBuddy(r);
+    setBuddy(r, hit);
     placePanel();
   }
 
@@ -635,8 +716,18 @@
     if (!resultEl.children.length) resultEl.replaceChildren(el('div', 'skel'), el('div', 'skel'));
     setBusy(true);
     try {
-      const res = await chrome.runtime.sendMessage({ type: 'analyze', code: src.code, lang: src.lang });
-      if (res && res.ok) { cache.set(k, res); lastKey = k; renderResult(res, src, false); }
+      const ctx = problemContext();
+      const anchor = !force && ctx && state.targets[ctx.slug] ? state.targets[ctx.slug] : null;
+      const res = await chrome.runtime.sendMessage({
+        type: 'analyze', code: src.code, lang: src.lang, anchor,
+        problem: ctx && { title: ctx.title, site: ctx.site, hints: ctx.hints, constraints: ctx.constraints },
+      });
+      if (res && res.ok) {
+        const o = res.result.optimal;
+        if (anchor) res.result.optimal = { ...(o || {}), ...anchor, matches: !!(o && o.matches) }; // keep the target stable across hovers
+        else if (o && ctx) rememberTarget(ctx.slug, o);                                          // first time (or a forced refresh): remember it
+        cache.set(k, res); lastKey = k; renderResult(res, src, false);
+      }
       else renderError(res || { error: 'No response from the extension.' });
     } catch (e) {
       renderError({ error: friendly(e) });
