@@ -2,13 +2,14 @@
   "manifest_version": 3,
   "name": "Complexity Buddy",
   "version": "1.0.0",
-  "description": "A cute floating buddy on LeetCode & NeetCode: hover to peek at your code's time & space complexity, click to pin it. Powered by Groq.",
+  "description": "A cute floating buddy on LeetCode & NeetCode: hover to peek at your code's time & space complexity and the optimal target, click to pin it. Powered by Groq or Gemini.",
   "minimum_chrome_version": "111",
   "permissions": [
     "storage"
   ],
   "host_permissions": [
-    "https://api.groq.com/*"
+    "https://api.groq.com/*",
+    "https://generativelanguage.googleapis.com/*"
   ],
   "background": {
     "service_worker": "background.js"

@@ -6,9 +6,17 @@
   'use strict';
   if (window.top !== window || document.getElementById('lcx-host')) return;
 
-  const DEFAULT_MODEL = 'openai/gpt-oss-120b';
-  const MODEL_SUGGESTIONS = ['openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'qwen/qwen3.8-27b'];
-  const RETIRED_MODELS = ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant'];
+  const PROVIDER_META = {
+    groq: {
+      label: 'Groq', scope: 'account', link: 'https://console.groq.com/keys', keyPlaceholder: 'Paste a Groq key (gsk_…)',
+      defaultModel: 'openai/gpt-oss-120b', suggestions: ['openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'qwen/qwen3.8-27b'],
+    },
+    gemini: {
+      label: 'Gemini', scope: 'Google Cloud project', link: 'https://aistudio.google.com/apikey', keyPlaceholder: 'Paste a Gemini key (AIza… or AQ.…)',
+      defaultModel: 'gemini-3.5-flash-lite', suggestions: ['gemini-3.5-flash-lite', 'gemini-3.8-flash', 'gemini-3.5-flash'],
+    },
+  };
+  const RETIRED_MODELS = { groq: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant'], gemini: [] };
   const UI_KEY = 'lcxUi';
   const EDGE = 10;          // gap between buddy and screen edge
   const HOVER_OPEN_MS = 140;
@@ -20,8 +28,10 @@
     y: Math.round(window.innerHeight * 0.4),
     pinned: false,
     open: false,
-    hasKey: false,
-    model: DEFAULT_MODEL,
+    hasKey: false,        // does the ACTIVE provider have at least one key?
+    provider: 'groq',     // the provider the user picked: 'groq' | 'gemini'
+    models: { groq: 'openai/gpt-oss-120b', gemini: 'gemini-3.5-flash-lite' }, // chosen model per provider
+    allKeys: [],          // last key list from the background worker (all providers; never the raw keys)
     targets: {}, // slug -> { time, space, how }: the optimal we already established per problem
     auto: false,
   };
@@ -171,9 +181,22 @@
     .kdel:hover { background: rgba(255,255,255,.1); color: #fff; }
     .kdel.armed { background: rgba(248,113,113,.18); color: #fca5a5; font-size: 11px; font-weight: 600; }
     .knone { padding: 4px 2px; font-size: 12px; color: #98a1b1; }
+    .seg { display: flex; gap: 4px; padding: 3px; border-radius: 10px; background: rgba(255,255,255,.06); }
+    .segbtn { flex: 1; padding: 6px 8px; border: 0; border-radius: 8px; background: transparent; color: #9aa4b5; font-weight: 600; cursor: pointer; }
+    .segbtn:hover { color: #e8ecf1; }
+    .segbtn[aria-selected="true"] { background: linear-gradient(135deg, #34d399, #22d3ee); color: #06241b; }
+    .segbtn .cnt { font-weight: 500; opacity: .7; }
+    .kmain { display: flex; flex-direction: column; min-width: 0; line-height: 1.3; }
+    .kname { padding: 0; border: 0; background: transparent; color: #e8ecf1; font: 600 12.5px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; text-align: left; cursor: text; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .kname.dim { color: #8b94a4; font-weight: 500; font-style: italic; }
+    .kname:hover { text-decoration: underline dotted; }
+    .kmain .kmask { font: 500 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #8b94a4; }
+    input[type="text"].kedit { width: 150px; padding: 3px 7px; font-size: 12px; border-radius: 6px; }
+    .addbox { display: flex; flex-direction: column; gap: 8px; }
     .addrow { display: flex; gap: 8px; }
     .addrow input { flex: 1; min-width: 0; }
     .hint.err { color: #fca5a5; }
+    .hint.warn { color: #fbbf24; }
     .saved { color: #4ade80; }
     .selwrap { position: relative; }
     .selwrap::after { content: ""; position: absolute; right: 13px; top: 50%; width: 6px; height: 6px; border-right: 1.6px solid #aab3c2; border-bottom: 1.6px solid #aab3c2; transform: translateY(-70%) rotate(45deg); pointer-events: none; }
@@ -215,13 +238,21 @@
             </div>
             <div id="vSet" hidden>
               <div class="note" id="setNote"></div>
-              <div class="fl"><span>Groq API keys</span><a href="https://console.groq.com/keys" target="_blank" rel="noopener noreferrer">get a free key</a></div>
+              <div class="seg" role="tablist" aria-label="AI provider">
+                <button class="segbtn" data-p="groq" role="tab">Groq<span class="cnt" id="cntGroq"></span></button>
+                <button class="segbtn" data-p="gemini" role="tab">Gemini<span class="cnt" id="cntGemini"></span></button>
+              </div>
+              <div class="fl"><span id="keysLabel"></span><a id="keyLink" href="#" target="_blank" rel="noopener noreferrer">get a free key</a></div>
               <div class="klist" id="keyList"></div>
-              <div class="addrow">
-                <input id="key" type="password" placeholder="Paste a Groq key (gsk_…)" autocomplete="off" spellcheck="false">
-                <button class="btn primary" id="btnAdd">Add</button>
+              <div class="addbox">
+                <input id="keyName" type="text" placeholder="Nickname (optional), e.g. Personal" maxlength="24" autocomplete="off" spellcheck="false">
+                <div class="addrow">
+                  <input id="key" type="password" autocomplete="off" spellcheck="false">
+                  <button class="btn primary" id="btnAdd">Add</button>
+                </div>
               </div>
               <div class="hint" id="keyMsg"></div>
+              <div class="hint" id="scopeHint"></div>
               <div class="fl"><span>Model</span><span class="saved" id="modelSaved"></span></div>
               <div class="selwrap"><select id="model" aria-label="Model"></select></div>
               <div class="row"><button class="btn" id="btnBack">Done</button></div>
@@ -255,7 +286,7 @@
   const $ = (id) => shadow.getElementById(id);
   const w = $('w'), pw = $('pw'), col = $('col'), head = $('head'), buddy = $('buddy'), badge = $('badge');
   const resultEl = $('result'), srcEl = $('src'), vMain = $('vMain'), vSet = $('vSet');
-  const keyIn = $('key'), modelIn = $('model'), autoChk = $('auto');
+  const keyIn = $('key'), nameIn = $('keyName'), modelIn = $('model'), autoChk = $('auto');
   const hasRealCode = (c) => (self.lcxHasRealCode ? self.lcxHasRealCode(c) : true); // code-check.js
 
   // ---------- helpers ----------
@@ -360,7 +391,7 @@
   }
 
   function onOpened() {
-    if (!state.hasKey) { showView('set', 'Paste your Groq API key to get started.'); return; }
+    if (!state.hasKey) { showView('set', needKeyNote()); return; }
     showView('main');
     analyze({ retries: 3 });
   }
@@ -395,12 +426,16 @@
   w.addEventListener('mousedown', (e) => { if (!e.target.closest('input, select, option, label, a')) e.preventDefault(); });
 
   // ---------- views ----------
+  const meta = () => PROVIDER_META[state.provider];
+  const needKeyNote = () => `Add a ${meta().label} API key to use ${meta().label}, or switch provider above.`;
+
   function showView(name, note) {
     const set = name === 'set';
     vMain.hidden = set;
     vSet.hidden = !set;
     if (set) {
-      $('setNote').textContent = note || 'Keys are tried in order. If one gets rate limited, the next takes over automatically.';
+      renderProvider();
+      $('setNote').textContent = note || 'Pick a provider. Its keys are tried in order; if one is rate limited, the next takes over.';
       $('btnBack').hidden = !state.hasKey;
       refreshKeys();
       if (state.hasKey) refreshModelList();
@@ -408,41 +443,103 @@
     requestAnimationFrame(placePanel);
   }
 
+  // Repaint everything in the settings view that depends on the active provider.
+  function renderProvider() {
+    const m = meta();
+    for (const b of shadow.querySelectorAll('.segbtn')) b.setAttribute('aria-selected', String(b.dataset.p === state.provider));
+    $('keysLabel').textContent = `${m.label} API keys`;
+    $('keyLink').href = m.link;
+    keyIn.placeholder = m.keyPlaceholder;
+    $('scopeHint').textContent = `${m.label} limits apply per ${m.scope}, so extra keys only help if they belong to different ${m.scope}s.`;
+    fillModels();
+    renderKeys();
+  }
+
+  async function setProvider(p) {
+    if (p === state.provider || !PROVIDER_META[p]) return;
+    state.provider = p;
+    await store.set({ provider: p });
+    cache.clear(); lastKey = ''; pausedUntil = 0;
+    setBuddy(null); resultEl.replaceChildren(); srcEl.textContent = '';
+    syncHasKey();
+    setKeyMsg('');
+    renderProvider();
+    if (state.hasKey) refreshModelList();
+  }
+  for (const b of shadow.querySelectorAll('.segbtn')) b.addEventListener('click', () => setProvider(b.dataset.p));
+
   // ----- keys (stored & rotated by the background worker; this is just the editor) -----
   const fmtWait = (s) => (s >= 3600 ? `${Math.ceil(s / 3600)}h` : s >= 60 ? `${Math.ceil(s / 60)}m` : `${s}s`);
   function setKeyMsg(text, kind) { const m = $('keyMsg'); m.textContent = text || ''; m.className = 'hint' + (kind ? ' ' + kind : ''); }
+  function syncHasKey() { state.hasKey = state.allKeys.some((k) => k.provider === state.provider); $('btnBack').hidden = !state.hasKey; }
 
   async function refreshKeys() {
     try {
       const r = await chrome.runtime.sendMessage({ type: 'keys:list' });
-      if (r && r.ok) { state.hasKey = r.keys.length > 0; $('btnBack').hidden = !state.hasKey; renderKeys(r.keys); }
+      if (r && r.ok) { state.allKeys = r.keys; syncHasKey(); renderKeys(); }
     } catch (e) { setKeyMsg(friendly(e), 'err'); }
   }
 
-  function renderKeys(list) {
-    if (!list.length) { $('keyList').replaceChildren(el('div', 'knone', 'No keys saved yet.')); return; }
-    $('keyList').replaceChildren(...list.map((k, i) => {
-      const row = el('div', 'kitem');
-      const label = k.status === 'rate' ? `rate limited · ${fmtWait(k.wait)}` : k.status === 'invalid' ? 'rejected' : 'ready';
-      const del = el('button', 'kdel', '×');
-      del.title = 'Remove this key';
-      del.setAttribute('aria-label', 'Remove key ' + (i + 1));
-      let armed = 0; // two-step remove so a stray click can never delete a key
-      del.addEventListener('click', async () => {
-        if (!armed) {
-          del.textContent = 'Remove?'; del.classList.add('armed');
-          armed = setTimeout(() => { armed = 0; del.textContent = '×'; del.classList.remove('armed'); }, 3000);
-          return;
-        }
-        clearTimeout(armed);
-        await chrome.runtime.sendMessage({ type: 'keys:remove', id: k.id });
-        cache.clear(); lastKey = '';
-        await refreshKeys();
-      });
-      row.append(el('span', 'knum', String(i + 1)), el('span', 'kdot ' + k.status), el('span', 'kmask', k.masked), el('span', 'kstat ' + k.status, label), del);
-      return row;
-    }));
+  function renderKeys() {
+    for (const p of Object.keys(PROVIDER_META)) {
+      const n = state.allKeys.filter((k) => k.provider === p).length;
+      $('cnt' + PROVIDER_META[p].label).textContent = n ? ` · ${n}` : '';
+    }
+    const list = state.allKeys.filter((k) => k.provider === state.provider);
+    $('keyList').replaceChildren(...(list.length ? list.map(keyRow) : [el('div', 'knone', `No ${meta().label} keys yet. Add one below.`)]));
     requestAnimationFrame(placePanel);
+  }
+
+  function keyRow(k, i) {
+    const row = el('div', 'kitem');
+    const label = k.status === 'rate' ? `rate limited · ${fmtWait(k.wait)}` : k.status === 'invalid' ? 'rejected' : 'ready';
+
+    const name = el('button', 'kname' + (k.name ? '' : ' dim'), k.name || `Key ${i + 1}`);
+    name.title = 'Click to rename';
+    name.addEventListener('click', () => startRename(k, name));
+    const main = el('div', 'kmain');
+    main.append(name, el('span', 'kmask', k.masked));
+
+    const del = el('button', 'kdel', '×');
+    del.title = 'Remove this key';
+    del.setAttribute('aria-label', 'Remove ' + (k.name || `key ${i + 1}`));
+    let armed = 0; // two-step remove so a stray click can never delete a key
+    del.addEventListener('click', async () => {
+      if (!armed) {
+        del.textContent = 'Remove?'; del.classList.add('armed');
+        armed = setTimeout(() => { armed = 0; del.textContent = '×'; del.classList.remove('armed'); }, 3000);
+        return;
+      }
+      clearTimeout(armed);
+      await chrome.runtime.sendMessage({ type: 'keys:remove', id: k.id });
+      cache.clear(); lastKey = '';
+      await refreshKeys();
+    });
+
+    row.append(el('span', 'knum', String(i + 1)), el('span', 'kdot ' + k.status), main, statEl(k, label), del);
+    return row;
+  }
+
+  function statEl(k, label) {
+    const e = el('span', 'kstat ' + k.status, label);
+    if (k.note) e.title = k.note; // why the provider rejected / limited this key
+    return e;
+  }
+
+  function startRename(k, nameEl) {
+    const inp = el('input', 'kedit');
+    inp.type = 'text'; inp.value = k.name || ''; inp.maxLength = 24; inp.placeholder = 'Nickname';
+    nameEl.replaceWith(inp);
+    inp.focus(); inp.select();
+    let done = false;
+    const finish = async (save) => {
+      if (done) return;
+      done = true;
+      if (save) { try { await chrome.runtime.sendMessage({ type: 'keys:rename', id: k.id, name: inp.value }); } catch (e) { setKeyMsg(friendly(e), 'err'); } }
+      await refreshKeys();
+    };
+    inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') finish(true); else if (e.key === 'Escape') finish(false); });
+    inp.addEventListener('blur', () => finish(true));
   }
 
   async function addKey() {
@@ -452,10 +549,11 @@
     $('btnAdd').disabled = true;
     setKeyMsg('Checking key…');
     try {
-      const r = await chrome.runtime.sendMessage({ type: 'keys:add', key: v });
+      const r = await chrome.runtime.sendMessage({ type: 'keys:add', provider: state.provider, key: v, name: nameIn.value });
       if (r && r.ok) {
-        keyIn.value = '';
-        setKeyMsg('Key added ✓', 'ok');
+        keyIn.value = ''; nameIn.value = '';
+        if (r.warning) setKeyMsg(`Saved, but ${meta().label} replied: ${r.warning}. Try it with the ↻ button.`, 'warn');
+        else setKeyMsg('Key added ✓', 'ok');
         cache.clear(); lastKey = ''; pausedUntil = 0;
         await refreshKeys();
         if (wasEmpty) { showView('main'); analyze({ force: true }); }
@@ -468,41 +566,52 @@
   }
   $('btnAdd').addEventListener('click', addKey);
   keyIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') addKey(); });
+  nameIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') keyIn.focus(); });
   $('btnBack').addEventListener('click', () => { showView('main'); analyze(); });
 
   // ----- model picker (a real <select>: <datalist> doesn't open inside a shadow root) -----
-  let modelList = MODEL_SUGGESTIONS.slice();
+  const modelLists = { groq: PROVIDER_META.groq.suggestions.slice(), gemini: PROVIDER_META.gemini.suggestions.slice() };
   function fillModels() {
-    const list = modelList.slice();
-    if (!list.includes(state.model)) list.unshift(state.model);
+    const cur = state.models[state.provider];
+    const list = modelLists[state.provider].slice();
+    if (!list.includes(cur)) list.unshift(cur);
     modelIn.replaceChildren(...list.map((m) => { const o = document.createElement('option'); o.value = m; o.textContent = m; return o; }));
-    modelIn.value = state.model;
+    modelIn.value = cur;
   }
   modelIn.addEventListener('change', () => {
-    state.model = modelIn.value;
-    store.set({ model: state.model });
+    state.models[state.provider] = modelIn.value;
+    chrome.runtime.sendMessage({ type: 'model:set', provider: state.provider, model: modelIn.value }).catch(() => {});
     cache.clear(); lastKey = '';
     const t = $('modelSaved'); t.textContent = 'Saved ✓';
     setTimeout(() => { t.textContent = ''; }, 1500);
   });
 
-  // Fill the dropdown with what the saved keys can actually use right now.
+  // Fill the dropdown with what this provider's keys can actually use right now.
   async function refreshModelList() {
+    const p = state.provider;
     try {
-      const r = await chrome.runtime.sendMessage({ type: 'models' });
-      if (r && r.ok && r.models.length) { modelList = r.models; fillModels(); }
+      const r = await chrome.runtime.sendMessage({ type: 'models', provider: p });
+      if (r && r.ok && r.models.length) { modelLists[p] = r.models; if (p === state.provider) fillModels(); }
     } catch { /* keep the static suggestions */ }
   }
 
   autoChk.addEventListener('change', () => store.set({ auto: autoChk.checked }));
 
   async function loadSettings() {
-    const s = await store.get(['groqKeys', 'groqKey', 'model', 'auto', 'lcxTargets']);
+    const s = await store.get(['apiKeys', 'provider', 'modelByProvider', 'groqKeys', 'groqKey', 'model', 'auto', 'lcxTargets']);
     state.targets = s.lcxTargets && typeof s.lcxTargets === 'object' ? s.lcxTargets : {};
-    state.hasKey = (Array.isArray(s.groqKeys) && s.groqKeys.length > 0) || !!s.groqKey; // groqKey = pre-multi-key installs
+    state.provider = PROVIDER_META[s.provider] ? s.provider : 'groq';
+    const keys = Array.isArray(s.apiKeys) ? s.apiKeys : [];
+    const legacyGroq = (Array.isArray(s.groqKeys) ? s.groqKeys.length : 0) + (s.groqKey ? 1 : 0); // Groq-only installs, until the worker migrates them
+    state.hasKey = keys.filter((k) => k.provider === state.provider).length + (state.provider === 'groq' ? legacyGroq : 0) > 0;
     state.auto = !!s.auto;
     autoChk.checked = state.auto;
-    state.model = s.model && !RETIRED_MODELS.includes(s.model) ? s.model : DEFAULT_MODEL;
+    const saved = s.modelByProvider && typeof s.modelByProvider === 'object' ? s.modelByProvider : {};
+    for (const p of Object.keys(PROVIDER_META)) {
+      let m = saved[p] || (p === 'groq' ? s.model : '') || '';
+      if (!m || RETIRED_MODELS[p].includes(m)) m = PROVIDER_META[p].defaultModel;
+      state.models[p] = m;
+    }
     fillModels();
   }
 
@@ -663,7 +772,7 @@
     resultEl.replaceChildren(...nodes);
     const lines = src.code.split('\n').length;
     srcEl.textContent = `${src.source}${src.lang ? ' · ' + src.lang : ''} · ${lines} line${lines === 1 ? '' : 's'}`;
-    updateFooter(`${entry.model} · ${cached ? 'cached' : (entry.ms / 1000).toFixed(1) + 's'}${entry.keyCount > 1 ? ` · key ${entry.keyIndex}/${entry.keyCount}` : ''}${entry.switchedFrom ? ' · auto-switched' : ''}`);
+    updateFooter(`${entry.model} · ${cached ? 'cached' : (entry.ms / 1000).toFixed(1) + 's'}${entry.keyCount > 1 ? ` · ${entry.keyName || 'key'} ${entry.keyIndex}/${entry.keyCount}` : ''}${entry.switchedFrom ? ' · auto-switched' : ''}`);
     setBuddy(r, hit);
     placePanel();
   }
@@ -690,7 +799,7 @@
   const friendly = (e) => (/context invalidated/i.test(String(e && e.message)) ? 'The extension was updated — refresh this tab.' : String((e && e.message) || e));
 
   async function analyze({ force = false, retries = 0, preferEditor = false } = {}) {
-    if (!state.hasKey) { showView('set', 'Paste your Groq API key to get started.'); return; }
+    if (!state.hasKey) { showView('set', needKeyNote()); return; }
     if (busy) return;
     if (!alive()) { renderError({ error: 'The extension was updated — refresh this tab.' }); return; }
 
@@ -757,9 +866,10 @@
     chrome.runtime.onMessage.addListener((m) => { if (m && m.type === 'toggle') togglePin(); });
     chrome.storage.onChanged.addListener((ch, area) => {
       if (area !== 'local') return;
-      if (ch.groqKeys || ch.groqKey) loadSettings().then(() => { if (!vSet.hidden) refreshKeys(); });
+      if (ch.apiKeys || ch.groqKeys || ch.groqKey || ch.provider || ch.modelByProvider || ch.model) {
+        loadSettings().then(() => { if (!vSet.hidden) { renderProvider(); refreshKeys(); } });
+      }
       if (ch.auto) { state.auto = !!ch.auto.newValue; autoChk.checked = state.auto; }
-      if (ch.model) { state.model = ch.model.newValue || DEFAULT_MODEL; fillModels(); }
     });
   } catch { /* extension context gone */ }
   window.addEventListener('resize', () => place(false));

@@ -4,10 +4,11 @@
 <body style="margin:0;height:100vh;background:#1e1e1e;color:#d4d4d4;font:14px -apple-system,sans-serif">
 <div style="padding:24px;max-width:560px">
   <h3>Dev harness (fake chrome.* APIs + fake Monaco)</h3>
-  <p>Runs the real <code>../content.js</code>, <code>../code-check.js</code> and <code>../page-bridge.js</code>.
-     Query flags: <code>?nokey</code> &middot; <code>?starter</code> (editor holds only the LeetCode starter template) &middot; <code>?problem</code> (pretend to be leetcode.com/problems/first-missing-positive).</p>
+  <p>Runs the real <code>content.js</code>, <code>code-check.js</code> and <code>page-bridge.js</code>.
+     Query flags: <code>?nokey</code> &middot; <code>?starter</code> (editor holds only the starter template) &middot;
+     <code>?problem</code> (pretend to be leetcode.com/problems/first-missing-positive) &middot; <code>?gemini</code> (start with Gemini active).</p>
   <pre id="ed" contenteditable spellcheck="false" style="background:#111;padding:12px;border-radius:8px;min-height:140px"></pre>
-  <p id="log" style="color:#888">fake Groq calls so far: 0</p>
+  <p id="log" style="color:#888">fake API calls so far: 0</p>
   <div data-track-load="description_content" id="desc" hidden>
     <p>Given an unsorted integer array nums. Return the smallest positive integer that is not present in nums.</p>
     <p>You must implement an algorithm that runs in O(n) time and uses O(1) auxiliary space.</p>
@@ -31,9 +32,20 @@
   const _attach = Element.prototype.attachShadow;
   Element.prototype.attachShadow = function (init) { const r = _attach.call(this, { ...init, mode: 'open' }); if (this.id === 'lcx-host') window.__root = r; return r; };
 
-  const mem = { lcxUi: { side: 'right', y: 120, pinned: false } };
-  const keys = q.includes('nokey') ? [] : [{ id: 'a', key: 'gsk_fakeAAAA1111', status: 'ready' }, { id: 'b', key: 'gsk_fakeBBBB2222', status: 'rate', wait: 42 }];
-  if (keys.length) mem.groqKeys = keys.map(({ id, key }) => ({ id, key }));
+  const LABEL = { groq: 'Groq', gemini: 'Gemini' };
+  const DEFAULT_MODEL = { groq: 'openai/gpt-oss-120b', gemini: 'gemini-3.5-flash-lite' };
+  const MODELS = {
+    groq: ['openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'qwen/qwen3.8-27b'],
+    gemini: ['gemini-3.5-flash-lite', 'gemini-3.8-flash', 'gemini-3.5-flash', 'gemini-2.5-flash'],
+  };
+  const mem = { lcxUi: { side: 'right', y: 120, pinned: false }, provider: q.includes('gemini') ? 'gemini' : 'groq' };
+  let keys = q.includes('nokey') ? [] : [
+    { id: 'a', provider: 'groq', key: 'gsk_fakeAAAA1111', name: 'Personal', status: 'ready' },
+    { id: 'b', provider: 'groq', key: 'gsk_fakeBBBB2222', name: '', status: 'rate', wait: 42 },
+    { id: 'c', provider: 'gemini', key: 'AIzaFakeCCCC0000000000000000000003333', name: 'Spare', status: 'ready' },
+  ];
+  const sync = () => { mem.apiKeys = keys.map(({ id, provider, key, name }) => ({ id, provider, key, name })); };
+  sync();
 
   const fakeEd = { getModel: () => model, getDomNode: () => document.getElementById('ed'), hasTextFocus: () => false };
   const model = { getValue: () => document.getElementById('ed').textContent, getLanguageId: () => 'python' };
@@ -41,30 +53,40 @@
 
   let calls = 0;
   window.__calls = () => calls;
-  const log = () => (document.getElementById('log').textContent = `fake Groq calls so far: ${calls}`);
+  window.__mem = mem;
+  const log = () => (document.getElementById('log').textContent = `fake API calls so far: ${calls}`);
   window.chrome = {
     runtime: {
       id: 'harness',
       onMessage: { addListener() {} },
       async sendMessage(m) {
-        if (m.type === 'keys:list') return { ok: true, keys: keys.map((k) => ({ id: k.id, masked: k.key.slice(0, 4) + '…' + k.key.slice(-4), status: k.status, wait: k.wait || 0 })) };
+        window.__lastMsg = m.type === 'analyze' ? m : window.__lastMsg;
+        if (m.type === 'keys:list') return { ok: true, keys: keys.map((k) => ({ id: k.id, provider: k.provider, name: k.name, masked: k.key.slice(0, 4) + '…' + k.key.slice(-4), status: k.status, wait: k.wait || 0 })) };
         if (m.type === 'keys:add') {
-          if (!/^gsk_/.test(m.key)) return { ok: false, error: 'That doesn’t look like a Groq key (they start with gsk_).' };
-          keys.push({ id: 'k' + keys.length, key: m.key, status: 'ready' }); mem.groqKeys = keys.map(({ id, key }) => ({ id, key })); return { ok: true, count: keys.length };
+          const ok = m.provider === 'groq' ? /^gsk_/.test(m.key) : /^(AIza|AQ\.)/.test(m.key);
+          if (!ok) return { ok: false, error: `That doesn’t look like a ${LABEL[m.provider]} key (they start with ${m.provider === 'groq' ? 'gsk_' : 'AIza or AQ.'}).` };
+          if (keys.some((k) => k.key === m.key)) return { ok: false, error: 'That key is already added.' };
+          keys.push({ id: 'k' + Math.random().toString(36).slice(2, 6), provider: m.provider, key: m.key, name: String(m.name || '').replace(/\s+/g, ' ').trim().slice(0, 24), status: 'ready' });
+          sync(); return { ok: true, count: keys.filter((k) => k.provider === m.provider).length };
         }
-        if (m.type === 'keys:remove') { const i = keys.findIndex((k) => k.id === m.id); if (i > -1) keys.splice(i, 1); mem.groqKeys = keys.map(({ id, key }) => ({ id, key })); return { ok: true, count: keys.length }; }
-        if (m.type === 'models') return { ok: true, models: ['openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'qwen/qwen3.8-27b', 'moonshotai/kimi-k2-instruct'] };
+        if (m.type === 'keys:rename') { const k = keys.find((x) => x.id === m.id); if (k) k.name = String(m.name || '').trim().slice(0, 24); sync(); return { ok: !!k }; }
+        if (m.type === 'keys:remove') { keys = keys.filter((k) => k.id !== m.id); sync(); return { ok: true }; }
+        if (m.type === 'models') return { ok: true, provider: m.provider, models: MODELS[m.provider] };
+        if (m.type === 'model:set') { mem.modelByProvider = { ...(mem.modelByProvider || {}), [m.provider]: m.model }; return { ok: true }; }
+
         // analyze
-        window.__lastMsg = m; calls++; log();
+        const pid = mem.provider, mine = keys.filter((k) => k.provider === pid);
+        if (!mine.length) return { ok: false, code: 'NO_KEY', error: `Add a ${LABEL[pid]} API key in settings.` };
+        calls++; log();
         await new Promise((r) => setTimeout(r, 700));
         const nested = (m.code.match(/for /g) || []).length > 1;
         const cyclic = /cyclic/.test(m.code);
-        // the target the "LLM" returns; honours the anchor like the real prompt asks
         const optimal = { time: 'O(n)', space: 'O(1)', how: 'Cyclic sort: swap each value v into index v-1, then scan.', matches: cyclic || nested /* nested: deliberately wrong claim */ };
         const result = cyclic ? { time: 'O(n)', space: 'O(1)', timeWhy: 'Each swap places one value for good.', spaceWhy: 'In-place swaps only.', approach: 'Cyclic sort' }
                      : nested ? { time: 'O(n^2)', space: 'O(1)', timeWhy: 'Nested loops each iterate over the input.', spaceWhy: 'Only a few scalars.', approach: 'Brute force' }
                      : { time: 'O(n)', space: 'O(n)', timeWhy: 'Single pass; set lookups are O(1) average.', spaceWhy: 'The set may hold every element.', approach: 'Hash set scan' };
-        return { ok: true, model: mem.model || 'openai/gpt-oss-120b', ms: 640, keyIndex: 2, keyCount: keys.length, result: { ...result, optimal } };
+        return { ok: true, provider: pid, model: (mem.modelByProvider || {})[pid] || DEFAULT_MODEL[pid], ms: 640,
+                 keyIndex: 1, keyCount: mine.length, keyName: mine[0].name, result: { ...result, optimal } };
       },
     },
     storage: {
